@@ -6,9 +6,10 @@ import org.example.downloader.exception.DownloadException
 import org.example.downloader.http.KtorHttpClient
 import org.example.downloader.model.DownloadConfig
 import java.nio.file.Path
+import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
-    val parsedArgs = parseArgs(args) ?: return
+    val parsedArgs = parseArgs(args) ?: exitProcess(1)
 
     val config = DownloadConfig(
         chunkSize = parsedArgs.chunkSize,
@@ -30,10 +31,13 @@ fun main(args: Array<String>) {
                 println("Download completed successfully.")
             } catch (e: DownloadException.RangesNotSupported) {
                 System.err.println("Error: ${e.message}")
+                exitProcess(1)
             } catch (e: DownloadException.NetworkError) {
                 System.err.println("Network error: ${e.message}")
+                exitProcess(1)
             } catch (e: DownloadException.FileWriteError) {
                 System.err.println("File write error: ${e.message}")
+                exitProcess(1)
             }
         }
     }
@@ -54,6 +58,19 @@ private fun parseArgs(args: Array<String>): ParsedArgs? {
 
     val url = args[0]
     val outputPath = args[1]
+
+    if (!isValidUrl(url)) {
+        System.err.println("Invalid URL: $url")
+        System.err.println("URL must start with http:// or https://")
+        return null
+    }
+
+    if (!isValidOutputPath(outputPath)) {
+        System.err.println("Invalid output path: $outputPath")
+        System.err.println("Parent directory does not exist.")
+        return null
+    }
+
     var chunkSize = DownloadConfig.DEFAULT_CHUNK_SIZE
     var parallelism = DownloadConfig.DEFAULT_MAX_PARALLEL_DOWNLOADS
 
@@ -82,6 +99,15 @@ private fun parseArgs(args: Array<String>): ParsedArgs? {
     }
 
     return ParsedArgs(url, outputPath, chunkSize, parallelism)
+}
+
+private fun isValidUrl(url: String): Boolean {
+    return url.startsWith("http://") || url.startsWith("https://")
+}
+
+private fun isValidOutputPath(outputPath: String): Boolean {
+    val parent = Path.of(outputPath).parent ?: return true // file in current directory is valid
+    return parent.toFile().isDirectory
 }
 
 private fun printUsage() {
