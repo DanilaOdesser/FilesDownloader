@@ -11,6 +11,7 @@ import org.example.downloader.model.ByteRange
 import org.example.downloader.model.DownloadConfig
 import org.example.downloader.util.withRetry
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Orchestrates parallel file downloading.
@@ -24,10 +25,12 @@ import java.nio.file.Path
  *
  * @param httpClient The HTTP client to use for requests.
  * @param config Download configuration (chunk size, parallelism, retry settings).
+ * @param progressListener Optional listener for download progress updates.
  */
 class FileDownloader(
     private val httpClient: HttpClient,
     private val config: DownloadConfig = DownloadConfig(),
+    private val progressListener: ProgressListener? = null,
 ) {
 
     /**
@@ -48,7 +51,7 @@ class FileDownloader(
 
         val ranges = ChunkSplitter.split(metadata.contentLength, config.chunkSize)
 
-        val chunks = downloadChunksInParallel(url, ranges)
+        val chunks = downloadChunksInParallel(url, ranges, metadata.contentLength)
 
         FileMerger.merge(chunks, outputPath)
     }
@@ -56,20 +59,27 @@ class FileDownloader(
     private suspend fun downloadChunksInParallel(
         url: String,
         ranges: List<ByteRange>,
+        totalBytes: Long,
     ): Map<ByteRange, ByteArray> {
         val semaphore = Semaphore(config.maxParallelDownloads)
+        val downloadedBytes = AtomicLong(0)
 
         return coroutineScope {
             ranges.map { range ->
                 async {
                     semaphore.withPermit {
-                        withRetry(
+                        val result = withRetry(
                             maxRetries = config.maxRetries,
                             initialDelayMs = config.retryDelayMs,
                             shouldRetry = { it is DownloadException.NetworkError },
                         ) {
                             range to httpClient.downloadRange(url, range)
                         }
+
+                        val newTotal = downloadedBytes.addAndGet(result.second.size.toLong())
+                        progressListener?.onProgress(newTotal, totalBytes)
+
+                        result
                     }
                 }
             }.awaitAll().toMap()

@@ -10,7 +10,9 @@ import java.nio.file.Path
 import kotlin.io.path.readBytes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
 
 class FileDownloaderTest {
@@ -156,7 +158,7 @@ class FileDownloaderTest {
         val config = DownloadConfig(
             chunkSize = 1024,
             maxRetries = 3,
-            retryDelayMs = 0, // no delay in tests
+            retryDelayMs = 0,
         )
         val downloader = FileDownloader(httpClient, config)
 
@@ -169,7 +171,7 @@ class FileDownloaderTest {
     @Test
     fun `fails after retries are exhausted`() = runTest {
         val content = ByteArray(1024) { (it % 256).toByte() }
-        val httpClient = FlakyHttpClient(content, failuresBeforeSuccess = 10) // always fails
+        val httpClient = FlakyHttpClient(content, failuresBeforeSuccess = 10)
         val config = DownloadConfig(
             chunkSize = 1024,
             maxRetries = 2,
@@ -182,5 +184,43 @@ class FileDownloaderTest {
         assertFailsWith<DownloadException.NetworkError> {
             downloader.download("http://example.com/file.bin", outputPath)
         }
+    }
+
+    @Test
+    fun `reports progress after each chunk`() = runTest {
+        val content = ByteArray(3072) { (it % 256).toByte() } // 3 chunks of 1024
+        val httpClient = FakeHttpClient(content)
+        val config = DownloadConfig(chunkSize = 1024, maxParallelDownloads = 1) // sequential for predictable order
+
+        val progressUpdates = mutableListOf<Pair<Long, Long>>()
+        val listener = ProgressListener { downloaded, total ->
+            progressUpdates.add(downloaded to total)
+        }
+
+        val downloader = FileDownloader(httpClient, config, listener)
+
+        val outputPath = tempDir.resolve("output.bin")
+        downloader.download("http://example.com/file.bin", outputPath)
+
+        // Should have 3 progress updates (one per chunk)
+        assertEquals(3, progressUpdates.size)
+
+        // All updates should report correct total
+        assertTrue(progressUpdates.all { it.second == 3072L })
+
+        // Final update should show all bytes downloaded
+        assertEquals(3072L, progressUpdates.last().first)
+    }
+
+    @Test
+    fun `progress listener is optional`() = runTest {
+        val content = "test".toByteArray()
+        val httpClient = FakeHttpClient(content)
+        val downloader = FileDownloader(httpClient) // no listener
+
+        val outputPath = tempDir.resolve("output.txt")
+        downloader.download("http://example.com/file.txt", outputPath)
+
+        assertContentEquals(content, outputPath.readBytes())
     }
 }

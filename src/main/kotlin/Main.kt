@@ -2,6 +2,7 @@ package org.example
 
 import kotlinx.coroutines.runBlocking
 import org.example.downloader.FileDownloader
+import org.example.downloader.ProgressListener
 import org.example.downloader.exception.DownloadException
 import org.example.downloader.http.KtorHttpClient
 import org.example.downloader.model.DownloadConfig
@@ -16,8 +17,14 @@ fun main(args: Array<String>) {
         maxParallelDownloads = parsedArgs.parallelism,
     )
 
+    val progressListener = ProgressListener { bytesDownloaded, totalBytes ->
+        val percent = (bytesDownloaded * 100) / totalBytes
+        print("\rProgress: $bytesDownloaded / $totalBytes bytes ($percent%)")
+        if (bytesDownloaded >= totalBytes) println()
+    }
+
     KtorHttpClient().use { httpClient ->
-        val downloader = FileDownloader(httpClient, config)
+        val downloader = FileDownloader(httpClient, config, progressListener)
 
         runBlocking {
             try {
