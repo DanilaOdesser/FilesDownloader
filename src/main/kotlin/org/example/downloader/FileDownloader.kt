@@ -21,7 +21,8 @@ import java.util.concurrent.atomic.AtomicLong
  * 2. Split file into byte ranges using [ChunkSplitter]
  * 3. Download all chunks in parallel (bounded by [DownloadConfig.maxParallelDownloads])
  *    with retry on transient failures
- * 4. Merge chunks into the output file using [FileMerger]
+ * 4. Verify each chunk's size matches the expected range length
+ * 5. Merge chunks into the output file using [FileMerger]
  *
  * Fallback when the server does not support ranges:
  * 1. Downloads the entire file in a single GET request
@@ -46,6 +47,7 @@ class FileDownloader(
      * @param url The URL of the file to download.
      * @param outputPath The local path where the file will be saved.
      * @throws DownloadException.NetworkError if a network error occurs and all retries are exhausted.
+     * @throws DownloadException.ChunkSizeMismatch if a downloaded chunk's size doesn't match the expected range.
      * @throws DownloadException.FileWriteError if writing to the output file fails.
      */
     suspend fun download(url: String, outputPath: Path) {
@@ -90,7 +92,7 @@ class FileDownloader(
             ranges.map { range ->
                 async {
                     semaphore.withPermit {
-                        val result = withRetry(
+                        val (downloadedRange, bytes) = withRetry(
                             maxRetries = config.maxRetries,
                             initialDelayMs = config.retryDelayMs,
                             shouldRetry = { it is DownloadException.NetworkError },
@@ -98,13 +100,25 @@ class FileDownloader(
                             range to httpClient.downloadRange(url, range)
                         }
 
-                        val newTotal = downloadedBytes.addAndGet(result.second.size.toLong())
+                        verifyChunkSize(downloadedRange, bytes)
+
+                        val newTotal = downloadedBytes.addAndGet(bytes.size.toLong())
                         progressListener?.onProgress(newTotal, totalBytes)
 
-                        result
+                        downloadedRange to bytes
                     }
                 }
             }.awaitAll().toMap()
+        }
+    }
+
+    private fun verifyChunkSize(range: ByteRange, bytes: ByteArray) {
+        if (bytes.size.toLong() != range.length) {
+            throw DownloadException.ChunkSizeMismatch(
+                expectedBytes = range.length,
+                actualBytes = bytes.size,
+                range = range.toRangeHeader(),
+            )
         }
     }
 }

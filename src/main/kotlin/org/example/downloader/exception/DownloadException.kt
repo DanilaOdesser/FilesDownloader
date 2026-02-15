@@ -17,4 +17,13 @@ sealed class DownloadException(message: String, cause: Throwable? = null) : Exce
     /** Failed to write downloaded data to the output file. */
     class FileWriteError(message: String, cause: Throwable? = null) :
         DownloadException(message, cause)
+
+    /** Downloaded chunk size does not match the expected range length. */
+    class ChunkSizeMismatch(
+        expectedBytes: Long,
+        actualBytes: Int,
+        range: String,
+    ) : DownloadException(
+        "Chunk size mismatch for range $range: expected $expectedBytes bytes, got $actualBytes"
+    )
 }

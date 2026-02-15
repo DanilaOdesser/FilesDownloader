@@ -82,6 +82,34 @@ class FileDownloaderTest {
         override fun close() {}
     }
 
+    /**
+     * A fake HttpClient that returns truncated data for range requests.
+     * Used to test chunk size verification.
+     */
+    private class TruncatingHttpClient(
+        private val fileContent: ByteArray,
+    ) : HttpClient {
+
+        override suspend fun fetchMetadata(url: String): FileMetadata {
+            return FileMetadata(
+                contentLength = fileContent.size.toLong(),
+                acceptsRanges = true,
+            )
+        }
+
+        override suspend fun downloadRange(url: String, range: ByteRange): ByteArray {
+            val fullChunk = fileContent.copyOfRange(range.start.toInt(), range.end.toInt() + 1)
+            // Return truncated data — one byte short
+            return fullChunk.copyOfRange(0, (fullChunk.size - 1).coerceAtLeast(0))
+        }
+
+        override suspend fun downloadFull(url: String): ByteArray {
+            return fileContent.copyOf()
+        }
+
+        override fun close() {}
+    }
+
     @Test
     fun `downloads small file as single chunk`() = runTest {
         val content = "Hello, World!".toByteArray()
@@ -209,6 +237,23 @@ class FileDownloaderTest {
         val outputPath = tempDir.resolve("output.bin")
 
         assertFailsWith<DownloadException.NetworkError> {
+            downloader.download("http://example.com/file.bin", outputPath)
+        }
+    }
+
+    @Test
+    fun `throws on chunk size mismatch`() = runTest {
+        val content = ByteArray(2048) { (it % 256).toByte() }
+        val httpClient = TruncatingHttpClient(content)
+        val config = DownloadConfig(
+            chunkSize = 1024,
+            maxRetries = 0,
+        )
+        val downloader = FileDownloader(httpClient, config)
+
+        val outputPath = tempDir.resolve("output.bin")
+
+        assertFailsWith<DownloadException.ChunkSizeMismatch> {
             downloader.download("http://example.com/file.bin", outputPath)
         }
     }
