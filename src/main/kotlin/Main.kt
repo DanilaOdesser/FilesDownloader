@@ -1,16 +1,99 @@
 package org.example
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
-fun main() {
-    val name = "Kotlin"
-    //TIP Press <shortcut actionId="ShowIntentionActions"/> with your caret at the highlighted text
-    // to see how IntelliJ IDEA suggests fixing it.
-    println("Hello, " + name + "!")
+import kotlinx.coroutines.runBlocking
+import org.example.downloader.FileDownloader
+import org.example.downloader.exception.DownloadException
+import org.example.downloader.http.KtorHttpClient
+import org.example.downloader.model.DownloadConfig
+import java.nio.file.Path
 
-    for (i in 1..5) {
-        //TIP Press <shortcut actionId="Debug"/> to start debugging your code. We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
-        // for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.
-        println("i = $i")
+fun main(args: Array<String>) {
+    val parsedArgs = parseArgs(args) ?: return
+
+    val config = DownloadConfig(
+        chunkSize = parsedArgs.chunkSize,
+        maxParallelDownloads = parsedArgs.parallelism,
+    )
+
+    KtorHttpClient().use { httpClient ->
+        val downloader = FileDownloader(httpClient, config)
+
+        runBlocking {
+            try {
+                println("Downloading: ${parsedArgs.url}")
+                println("Output: ${parsedArgs.outputPath}")
+                println("Chunk size: ${parsedArgs.chunkSize / 1024} KB, Parallel downloads: ${parsedArgs.parallelism}")
+                println()
+
+                downloader.download(parsedArgs.url, Path.of(parsedArgs.outputPath))
+
+                println("Download completed successfully.")
+            } catch (e: DownloadException.RangesNotSupported) {
+                System.err.println("Error: ${e.message}")
+            } catch (e: DownloadException.NetworkError) {
+                System.err.println("Network error: ${e.message}")
+            } catch (e: DownloadException.FileWriteError) {
+                System.err.println("File write error: ${e.message}")
+            }
+        }
     }
+}
+
+private data class ParsedArgs(
+    val url: String,
+    val outputPath: String,
+    val chunkSize: Long = DownloadConfig.DEFAULT_CHUNK_SIZE,
+    val parallelism: Int = DownloadConfig.DEFAULT_MAX_PARALLEL_DOWNLOADS,
+)
+
+private fun parseArgs(args: Array<String>): ParsedArgs? {
+    if (args.size < 2) {
+        printUsage()
+        return null
+    }
+
+    val url = args[0]
+    val outputPath = args[1]
+    var chunkSize = DownloadConfig.DEFAULT_CHUNK_SIZE
+    var parallelism = DownloadConfig.DEFAULT_MAX_PARALLEL_DOWNLOADS
+
+    for (arg in args.drop(2)) {
+        when {
+            arg.startsWith("--chunk-size=") -> {
+                chunkSize = arg.substringAfter("=").toLongOrNull()
+                    ?: run {
+                        System.err.println("Invalid chunk size: ${arg.substringAfter("=")}")
+                        return null
+                    }
+            }
+            arg.startsWith("--parallel=") -> {
+                parallelism = arg.substringAfter("=").toIntOrNull()
+                    ?: run {
+                        System.err.println("Invalid parallelism value: ${arg.substringAfter("=")}")
+                        return null
+                    }
+            }
+            else -> {
+                System.err.println("Unknown argument: $arg")
+                printUsage()
+                return null
+            }
+        }
+    }
+
+    return ParsedArgs(url, outputPath, chunkSize, parallelism)
+}
+
+private fun printUsage() {
+    println("""
+        Usage: filesdownloader <url> <output-path> [options]
+        
+        Options:
+          --chunk-size=<bytes>    Size of each download chunk in bytes (default: 1048576 = 1 MB)
+          --parallel=<count>     Maximum parallel downloads (default: 4)
+        
+        Example:
+          filesdownloader http://localhost:8080/file.txt output.txt
+          filesdownloader http://localhost:8080/file.txt output.txt --chunk-size=524288 --parallel=8
+    """.trimIndent())
 }
