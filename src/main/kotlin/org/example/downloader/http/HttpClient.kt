@@ -30,4 +30,14 @@ interface HttpClient : AutoCloseable {
      * @throws org.example.downloader.exception.DownloadException.NetworkError on request failure.
      */
     suspend fun downloadRange(url: String, range: ByteRange): ByteArray
+
+    /**
+     * Downloads the entire file in a single request (no Range header).
+     * Used as a fallback when the server does not support byte-range requests.
+     *
+     * @param url The file URL to download.
+     * @return The raw bytes of the entire file.
+     * @throws org.example.downloader.exception.DownloadException.NetworkError on request failure.
+     */
+    suspend fun downloadFull(url: String): ByteArray
 }

@@ -63,6 +63,24 @@ class KtorHttpClient(engine: HttpClientEngine = CIO.create()) : HttpClient {
         }
     }
 
+    override suspend fun downloadFull(url: String): ByteArray {
+        try {
+            val response = client.get(url)
+
+            if (response.status != HttpStatusCode.OK) {
+                throw DownloadException.NetworkError(
+                    "Expected 200 OK but got ${response.status} for: $url"
+                )
+            }
+
+            return response.bodyAsBytes()
+        } catch (e: DownloadException) {
+            throw e
+        } catch (e: Exception) {
+            throw DownloadException.NetworkError("Failed to download file from: $url", e)
+        }
+    }
+
     override fun close() {
         client.close()
     }

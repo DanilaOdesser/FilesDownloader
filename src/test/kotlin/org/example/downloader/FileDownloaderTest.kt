@@ -39,6 +39,10 @@ class FileDownloaderTest {
             return fileContent.copyOfRange(range.start.toInt(), range.end.toInt() + 1)
         }
 
+        override suspend fun downloadFull(url: String): ByteArray {
+            return fileContent.copyOf()
+        }
+
         override fun close() {}
     }
 
@@ -69,6 +73,10 @@ class FileDownloaderTest {
             }
 
             return fileContent.copyOfRange(range.start.toInt(), range.end.toInt() + 1)
+        }
+
+        override suspend fun downloadFull(url: String): ByteArray {
+            return fileContent.copyOf()
         }
 
         override fun close() {}
@@ -127,16 +135,35 @@ class FileDownloaderTest {
     }
 
     @Test
-    fun `throws when server does not support ranges`() = runTest {
-        val content = "test".toByteArray()
+    fun `falls back to full download when ranges not supported`() = runTest {
+        val content = "Hello, fallback!".toByteArray()
         val httpClient = FakeHttpClient(content, supportsRanges = false)
         val downloader = FileDownloader(httpClient)
 
         val outputPath = tempDir.resolve("output.txt")
+        downloader.download("http://example.com/file.txt", outputPath)
 
-        assertFailsWith<DownloadException.RangesNotSupported> {
-            downloader.download("http://example.com/file.txt", outputPath)
+        assertContentEquals(content, outputPath.readBytes())
+    }
+
+    @Test
+    fun `fallback download reports progress`() = runTest {
+        val content = ByteArray(2048) { (it % 256).toByte() }
+        val httpClient = FakeHttpClient(content, supportsRanges = false)
+
+        val progressUpdates = mutableListOf<Pair<Long, Long>>()
+        val listener = ProgressListener { downloaded, total ->
+            progressUpdates.add(downloaded to total)
         }
+
+        val downloader = FileDownloader(httpClient, progressListener = listener)
+
+        val outputPath = tempDir.resolve("output.bin")
+        downloader.download("http://example.com/file.bin", outputPath)
+
+        assertEquals(1, progressUpdates.size)
+        assertEquals(2048L, progressUpdates[0].first)
+        assertEquals(2048L, progressUpdates[0].second)
     }
 
     @Test
@@ -188,9 +215,9 @@ class FileDownloaderTest {
 
     @Test
     fun `reports progress after each chunk`() = runTest {
-        val content = ByteArray(3072) { (it % 256).toByte() } // 3 chunks of 1024
+        val content = ByteArray(3072) { (it % 256).toByte() }
         val httpClient = FakeHttpClient(content)
-        val config = DownloadConfig(chunkSize = 1024, maxParallelDownloads = 1) // sequential for predictable order
+        val config = DownloadConfig(chunkSize = 1024, maxParallelDownloads = 1)
 
         val progressUpdates = mutableListOf<Pair<Long, Long>>()
         val listener = ProgressListener { downloaded, total ->
@@ -202,13 +229,8 @@ class FileDownloaderTest {
         val outputPath = tempDir.resolve("output.bin")
         downloader.download("http://example.com/file.bin", outputPath)
 
-        // Should have 3 progress updates (one per chunk)
         assertEquals(3, progressUpdates.size)
-
-        // All updates should report correct total
         assertTrue(progressUpdates.all { it.second == 3072L })
-
-        // Final update should show all bytes downloaded
         assertEquals(3072L, progressUpdates.last().first)
     }
 
@@ -216,7 +238,7 @@ class FileDownloaderTest {
     fun `progress listener is optional`() = runTest {
         val content = "test".toByteArray()
         val httpClient = FakeHttpClient(content)
-        val downloader = FileDownloader(httpClient) // no listener
+        val downloader = FileDownloader(httpClient)
 
         val outputPath = tempDir.resolve("output.txt")
         downloader.download("http://example.com/file.txt", outputPath)

@@ -16,12 +16,16 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Orchestrates parallel file downloading.
  *
- * Flow:
+ * Flow when the server supports range requests:
  * 1. HEAD request to get file size and confirm range support
  * 2. Split file into byte ranges using [ChunkSplitter]
  * 3. Download all chunks in parallel (bounded by [DownloadConfig.maxParallelDownloads])
  *    with retry on transient failures
  * 4. Merge chunks into the output file using [FileMerger]
+ *
+ * Fallback when the server does not support ranges:
+ * 1. Downloads the entire file in a single GET request
+ * 2. Writes the result directly to the output file
  *
  * @param httpClient The HTTP client to use for requests.
  * @param config Download configuration (chunk size, parallelism, retry settings).
@@ -36,9 +40,11 @@ class FileDownloader(
     /**
      * Downloads a file from the given URL and saves it to the output path.
      *
+     * If the server supports byte-range requests, the file is downloaded in parallel chunks.
+     * Otherwise, falls back to a single-stream full download.
+     *
      * @param url The URL of the file to download.
      * @param outputPath The local path where the file will be saved.
-     * @throws DownloadException.RangesNotSupported if the server does not support range requests.
      * @throws DownloadException.NetworkError if a network error occurs and all retries are exhausted.
      * @throws DownloadException.FileWriteError if writing to the output file fails.
      */
@@ -46,7 +52,8 @@ class FileDownloader(
         val metadata = httpClient.fetchMetadata(url)
 
         if (!metadata.acceptsRanges) {
-            throw DownloadException.RangesNotSupported(url)
+            downloadFullFile(url, outputPath, metadata.contentLength)
+            return
         }
 
         val ranges = ChunkSplitter.split(metadata.contentLength, config.chunkSize)
@@ -54,6 +61,21 @@ class FileDownloader(
         val chunks = downloadChunksInParallel(url, ranges, metadata.contentLength)
 
         FileMerger.merge(chunks, outputPath)
+    }
+
+    private suspend fun downloadFullFile(url: String, outputPath: Path, totalBytes: Long) {
+        val bytes = withRetry(
+            maxRetries = config.maxRetries,
+            initialDelayMs = config.retryDelayMs,
+            shouldRetry = { it is DownloadException.NetworkError },
+        ) {
+            httpClient.downloadFull(url)
+        }
+
+        progressListener?.onProgress(bytes.size.toLong(), totalBytes)
+
+        val chunk = mapOf(ByteRange(0, bytes.size.toLong() - 1) to bytes)
+        FileMerger.merge(chunk, outputPath)
     }
 
     private suspend fun downloadChunksInParallel(

@@ -126,4 +126,38 @@ class KtorHttpClientTest {
             assertTrue(exception.message!!.contains("206"))
         }
     }
+
+    @Test
+    fun `downloadFull returns entire file for 200 response`() = runTest {
+        val expectedBytes = "Complete file content".toByteArray()
+
+        val mockEngine = MockEngine { _ ->
+            respond(
+                content = expectedBytes,
+                status = HttpStatusCode.OK,
+            )
+        }
+
+        KtorHttpClient(mockEngine).use { client ->
+            val bytes = client.downloadFull("http://example.com/file.txt")
+
+            assertContentEquals(expectedBytes, bytes)
+        }
+    }
+
+    @Test
+    fun `downloadFull throws when response is not 200`() = runTest {
+        val mockEngine = MockEngine { _ ->
+            respond(
+                content = "Not Found",
+                status = HttpStatusCode.NotFound,
+            )
+        }
+
+        KtorHttpClient(mockEngine).use { client ->
+            assertFailsWith<DownloadException.NetworkError> {
+                client.downloadFull("http://example.com/missing.txt")
+            }
+        }
+    }
 }
