@@ -25,6 +25,9 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
 
+    // Logging
+    implementation("ch.qos.logback:logback-classic:1.5.18")
+
     // Testing
     testImplementation(kotlin("test"))
     testImplementation("io.ktor:ktor-client-mock:$ktorVersion")
