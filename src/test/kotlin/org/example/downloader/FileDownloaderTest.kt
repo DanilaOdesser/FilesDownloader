@@ -20,7 +20,6 @@ class FileDownloaderTest {
 
     /**
      * A fake HttpClient for testing that returns predictable data.
-     * Each chunk is filled with bytes derived from its range index.
      */
     private class FakeHttpClient(
         private val fileContent: ByteArray,
@@ -35,6 +34,38 @@ class FileDownloaderTest {
         }
 
         override suspend fun downloadRange(url: String, range: ByteRange): ByteArray {
+            return fileContent.copyOfRange(range.start.toInt(), range.end.toInt() + 1)
+        }
+
+        override fun close() {}
+    }
+
+    /**
+     * A fake HttpClient that fails a configurable number of times before succeeding.
+     * Used to test retry behavior in FileDownloader.
+     */
+    private class FlakyHttpClient(
+        private val fileContent: ByteArray,
+        private val failuresBeforeSuccess: Int,
+    ) : HttpClient {
+
+        private val attemptCounts = mutableMapOf<ByteRange, Int>()
+
+        override suspend fun fetchMetadata(url: String): FileMetadata {
+            return FileMetadata(
+                contentLength = fileContent.size.toLong(),
+                acceptsRanges = true,
+            )
+        }
+
+        override suspend fun downloadRange(url: String, range: ByteRange): ByteArray {
+            val attempts = attemptCounts.getOrDefault(range, 0) + 1
+            attemptCounts[range] = attempts
+
+            if (attempts <= failuresBeforeSuccess) {
+                throw DownloadException.NetworkError("Simulated failure #$attempts for range $range")
+            }
+
             return fileContent.copyOfRange(range.start.toInt(), range.end.toInt() + 1)
         }
 
@@ -116,5 +147,40 @@ class FileDownloaderTest {
         downloader.download("http://example.com/tiny.bin", outputPath)
 
         assertContentEquals(content, outputPath.readBytes())
+    }
+
+    @Test
+    fun `succeeds after transient failures with retry`() = runTest {
+        val content = ByteArray(3000) { (it % 256).toByte() }
+        val httpClient = FlakyHttpClient(content, failuresBeforeSuccess = 2)
+        val config = DownloadConfig(
+            chunkSize = 1024,
+            maxRetries = 3,
+            retryDelayMs = 0, // no delay in tests
+        )
+        val downloader = FileDownloader(httpClient, config)
+
+        val outputPath = tempDir.resolve("output.bin")
+        downloader.download("http://example.com/file.bin", outputPath)
+
+        assertContentEquals(content, outputPath.readBytes())
+    }
+
+    @Test
+    fun `fails after retries are exhausted`() = runTest {
+        val content = ByteArray(1024) { (it % 256).toByte() }
+        val httpClient = FlakyHttpClient(content, failuresBeforeSuccess = 10) // always fails
+        val config = DownloadConfig(
+            chunkSize = 1024,
+            maxRetries = 2,
+            retryDelayMs = 0,
+        )
+        val downloader = FileDownloader(httpClient, config)
+
+        val outputPath = tempDir.resolve("output.bin")
+
+        assertFailsWith<DownloadException.NetworkError> {
+            downloader.download("http://example.com/file.bin", outputPath)
+        }
     }
 }
