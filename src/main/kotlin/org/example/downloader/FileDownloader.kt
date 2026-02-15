@@ -10,6 +10,8 @@ import org.example.downloader.http.HttpClient
 import org.example.downloader.model.ByteRange
 import org.example.downloader.model.DownloadConfig
 import org.example.downloader.util.withRetry
+import java.io.IOException
+import java.io.RandomAccessFile
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicLong
 
@@ -19,10 +21,13 @@ import java.util.concurrent.atomic.AtomicLong
  * Flow when the server supports range requests:
  * 1. HEAD request to get file size and confirm range support
  * 2. Split file into byte ranges using [ChunkSplitter]
- * 3. Download all chunks in parallel (bounded by [DownloadConfig.maxParallelDownloads])
+ * 3. Create the output file and pre-allocate it to the full file size
+ * 4. Download all chunks in parallel (bounded by [DownloadConfig.maxParallelDownloads])
  *    with retry on transient failures
- * 4. Verify each chunk's size matches the expected range length
- * 5. Merge chunks into the output file using [FileMerger]
+ * 5. Verify each chunk's size and write it directly to the correct offset on disk
+ *
+ * Each chunk is written to disk immediately after downloading and verification,
+ * so only one chunk at a time is held in memory per concurrent download.
  *
  * Fallback when the server does not support ranges:
  * 1. Downloads the entire file in a single GET request
@@ -41,8 +46,8 @@ class FileDownloader(
     /**
      * Downloads a file from the given URL and saves it to the output path.
      *
-     * If the server supports byte-range requests, the file is downloaded in parallel chunks.
-     * Otherwise, falls back to a single-stream full download.
+     * If the server supports byte-range requests, the file is downloaded in parallel chunks
+     * and streamed directly to disk. Otherwise, falls back to a single-stream full download.
      *
      * @param url The URL of the file to download.
      * @param outputPath The local path where the file will be saved.
@@ -60,9 +65,7 @@ class FileDownloader(
 
         val ranges = ChunkSplitter.split(metadata.contentLength, config.chunkSize)
 
-        val chunks = downloadChunksInParallel(url, ranges, metadata.contentLength)
-
-        FileMerger.merge(chunks, outputPath)
+        downloadAndWriteChunks(url, ranges, metadata.contentLength, outputPath)
     }
 
     private suspend fun downloadFullFile(url: String, outputPath: Path, totalBytes: Long) {
@@ -76,40 +79,65 @@ class FileDownloader(
 
         progressListener?.onProgress(bytes.size.toLong(), totalBytes)
 
-        val chunk = mapOf(ByteRange(0, bytes.size.toLong() - 1) to bytes)
-        FileMerger.merge(chunk, outputPath)
+        try {
+            outputPath.toFile().writeBytes(bytes)
+        } catch (e: IOException) {
+            throw DownloadException.FileWriteError("Failed to write to file: $outputPath", e)
+        }
     }
 
-    private suspend fun downloadChunksInParallel(
+    private suspend fun downloadAndWriteChunks(
         url: String,
         ranges: List<ByteRange>,
         totalBytes: Long,
-    ): Map<ByteRange, ByteArray> {
+        outputPath: Path,
+    ) {
         val semaphore = Semaphore(config.maxParallelDownloads)
         val downloadedBytes = AtomicLong(0)
 
-        return coroutineScope {
-            ranges.map { range ->
-                async {
-                    semaphore.withPermit {
-                        val (downloadedRange, bytes) = withRetry(
-                            maxRetries = config.maxRetries,
-                            initialDelayMs = config.retryDelayMs,
-                            shouldRetry = { it is DownloadException.NetworkError },
-                        ) {
-                            range to httpClient.downloadRange(url, range)
-                        }
-
-                        verifyChunkSize(downloadedRange, bytes)
-
-                        val newTotal = downloadedBytes.addAndGet(bytes.size.toLong())
-                        progressListener?.onProgress(newTotal, totalBytes)
-
-                        downloadedRange to bytes
-                    }
-                }
-            }.awaitAll().toMap()
+        val raf = try {
+            RandomAccessFile(outputPath.toFile(), "rw").also {
+                it.setLength(totalBytes)
+            }
+        } catch (e: IOException) {
+            throw DownloadException.FileWriteError("Failed to create output file: $outputPath", e)
         }
+
+        try {
+            raf.use { file ->
+                coroutineScope {
+                    ranges.map { range ->
+                        async {
+                            semaphore.withPermit {
+                                val bytes = withRetry(
+                                    maxRetries = config.maxRetries,
+                                    initialDelayMs = config.retryDelayMs,
+                                    shouldRetry = { it is DownloadException.NetworkError },
+                                ) {
+                                    httpClient.downloadRange(url, range)
+                                }
+
+                                verifyChunkSize(range, bytes)
+                                writeChunk(file, range, bytes)
+
+                                val newTotal = downloadedBytes.addAndGet(bytes.size.toLong())
+                                progressListener?.onProgress(newTotal, totalBytes)
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
+        } catch (e: DownloadException) {
+            throw e
+        } catch (e: IOException) {
+            throw DownloadException.FileWriteError("Failed to write to file: $outputPath", e)
+        }
+    }
+
+    @Synchronized
+    private fun writeChunk(file: RandomAccessFile, range: ByteRange, bytes: ByteArray) {
+        file.seek(range.start)
+        file.write(bytes)
     }
 
     private fun verifyChunkSize(range: ByteRange, bytes: ByteArray) {
